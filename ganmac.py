@@ -11,32 +11,32 @@ import os
 from PIL import Image
 
 def main():
-    # Cihaz ayarı (macOS CPU-only ortamı için GPU olmayabilir)
+    # Cihaz ayarı
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     # Hiperparametreler
     batch_size = 32
-    lr = 0.0002
-    num_epochs = 100
-    latent_dim = 100  # Rastgele gürültü vektörünün boyutu
-    img_size = 224     # Görüntü boyutu
-    img_channels = 3  # Renkli görüntüler için 3 kanal
+    lr = 0.0002  # Learning rate'i biraz düşürelim
+    num_epochs = 200  # Epoch sayısını artıralım
+    latent_dim = 128  # Gürültü vektörünün boyutunu artıralım
+    img_size = 224
+    img_channels = 3
 
-    # Veri seti dönüşümleri
+    # Veri seti dönüşümleri - Daha güçlü augmentasyon ekleyelim
     transform = transforms.Compose([
         transforms.Resize((img_size, img_size)),
-        transforms.RandomHorizontalFlip(),
+        transforms.RandomHorizontalFlip(p=0.5),
+        transforms.RandomRotation(10),  # Hafif rotasyon ekleyelim
+        transforms.ColorJitter(brightness=0.2, contrast=0.2),  # Renk ayarlamaları
         transforms.ToTensor(),
         transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5))
     ])
 
-    # Veri setini yükleyelim
     try:
         # Healthy klasöründeki tüm görüntüleri listele
         image_files = [f for f in os.listdir('/Users/burkayozdemir/Desktop/myprojects/gan_dataaug/7030/healthy') 
                       if f.endswith(('.jpg', '.png', '.jpeg'))]
         
-        # Görüntüleri yükle
         images = []
         for img_file in image_files:
             img_path = os.path.join('/Users/burkayozdemir/Desktop/myprojects/gan_dataaug/7030/healthy', img_file)
@@ -45,7 +45,6 @@ def main():
                 img = transform(img)
             images.append(img)
         
-        # Tensor listesini tensor'a çevir
         images = torch.stack(images)
         
         print(f"Toplam görüntü sayısı: {len(images)}")
@@ -56,61 +55,77 @@ def main():
             num_workers=0,
             pin_memory=True
         )
+
     except Exception as e:
         print(f"Veri setini yükleme hatası: {e}")
         return
 
-    # --- Generator Modeli ---
+    # Generator Modeli - Daha derin ve geniş bir yapı
     class Generator(nn.Module):
         def __init__(self, latent_dim, img_channels):
             super(Generator, self).__init__()
-            self.init_size = img_size // 4
-            self.l1 = nn.Sequential(nn.Linear(latent_dim, 128 * self.init_size ** 2))
+            self.init_size = img_size // 8
+            self.l1 = nn.Sequential(
+                nn.Linear(latent_dim, 256 * self.init_size ** 2),
+                nn.LeakyReLU(0.2)
+            )
 
             self.conv_blocks = nn.Sequential(
-                nn.BatchNorm2d(128),
+                nn.BatchNorm2d(256),
+                
                 nn.Upsample(scale_factor=2),
-                nn.Conv2d(128, 128, 3, stride=1, padding=1),
-                nn.BatchNorm2d(128, 0.8),
-                nn.LeakyReLU(0.2, inplace=True),
+                nn.Conv2d(256, 256, 3, stride=1, padding=1),
+                nn.BatchNorm2d(256),
+                nn.LeakyReLU(0.2),
+                
+                nn.Upsample(scale_factor=2),
+                nn.Conv2d(256, 128, 3, stride=1, padding=1),
+                nn.BatchNorm2d(128),
+                nn.LeakyReLU(0.2),
+                
                 nn.Upsample(scale_factor=2),
                 nn.Conv2d(128, 64, 3, stride=1, padding=1),
-                nn.BatchNorm2d(64, 0.8),
-                nn.LeakyReLU(0.2, inplace=True),
+                nn.BatchNorm2d(64),
+                nn.LeakyReLU(0.2),
+                
                 nn.Conv2d(64, img_channels, 3, stride=1, padding=1),
                 nn.Tanh()
             )
 
         def forward(self, z):
             out = self.l1(z)
-            out = out.view(out.shape[0], 128, self.init_size, self.init_size)
+            out = out.view(out.shape[0], 256, self.init_size, self.init_size)
             img = self.conv_blocks(out)
             return img
 
-    # --- Discriminator Modeli ---
+    # Discriminator Modeli - Daha derin ve güçlü bir yapı
     class Discriminator(nn.Module):
         def __init__(self, img_channels):
             super(Discriminator, self).__init__()
 
-            def discriminator_block(in_filters, out_filters, bn=True):
-                block = [nn.Conv2d(in_filters, out_filters, 3, 2, 1),
-                        nn.LeakyReLU(0.2, inplace=True),
-                        nn.Dropout2d(0.25)]
+            def discriminator_block(in_filters, out_filters, bn=True, kernel_size=4):
+                block = [
+                    nn.Conv2d(in_filters, out_filters, kernel_size, stride=2, padding=1),
+                    nn.LeakyReLU(0.2, inplace=True),
+                    nn.Dropout2d(0.25)
+                ]
                 if bn:
-                    block.append(nn.BatchNorm2d(out_filters, 0.8))
+                    block.append(nn.BatchNorm2d(out_filters))
                 return block
 
             self.model = nn.Sequential(
-                *discriminator_block(img_channels, 16, bn=False),
-                *discriminator_block(16, 32),
+                *discriminator_block(img_channels, 32, bn=False),
                 *discriminator_block(32, 64),
                 *discriminator_block(64, 128),
+                *discriminator_block(128, 256),
+                *discriminator_block(256, 512),
             )
 
-            # Görüntü boyutunu hesapla
-            ds_size = img_size // 2**4
+            ds_size = img_size // 2**5
             self.adv_layer = nn.Sequential(
-                nn.Linear(128 * ds_size ** 2, 1),
+                nn.Linear(512 * ds_size ** 2, 1024),
+                nn.LeakyReLU(0.2),
+                nn.Linear(1024, 1),
                 nn.Sigmoid()
             )
 
@@ -124,17 +139,18 @@ def main():
     generator = Generator(latent_dim, img_channels).to(device)
     discriminator = Discriminator(img_channels).to(device)
 
-    # Kayıp fonksiyonu ve optimizasyon ayarları
+    # Kayıp fonksiyonları - Perceptual loss ekleyelim
     adversarial_loss = nn.BCELoss()
+    l1_loss = nn.L1Loss()  # L1 loss ekleyelim
+
+    # Optimizasyon ayarları - Beta değerlerini güncelleyelim
     optimizer_G = optim.Adam(generator.parameters(), lr=lr, betas=(0.5, 0.999))
     optimizer_D = optim.Adam(discriminator.parameters(), lr=lr, betas=(0.5, 0.999))
 
-    # Eğitim için yardımcı fonksiyon
     def save_generated_images(epoch, generator, fixed_noise):
         generator.eval()
         with torch.no_grad():
             fake_imgs = generator(fixed_noise)
-            # Görüntüleri (-1,1) aralığından (0,1)'e çekiyoruz
             fake_imgs = (fake_imgs + 1) / 2
             grid = torchvision.utils.make_grid(fake_imgs[:16], nrow=4, normalize=False)
             plt.figure(figsize=(10, 10))
@@ -145,7 +161,6 @@ def main():
             plt.close()
         generator.train()
 
-    # Sabit gürültü vektörü (görselleştirme için)
     fixed_noise = torch.randn(16, latent_dim, device=device)
 
     print("Eğitim başlıyor...")
@@ -153,18 +168,21 @@ def main():
         for i, real_imgs in enumerate(dataloader):
             batch_size = real_imgs.size(0)
             
-            # Gerçek ve sahte etiketler
             valid = torch.ones(batch_size, 1, device=device)
             fake = torch.zeros(batch_size, 1, device=device)
 
-            # Gerçek görüntüler
             real_imgs = real_imgs.to(device)
 
             # Generator Eğitimi
             optimizer_G.zero_grad()
             z = torch.randn(batch_size, latent_dim, device=device)
             gen_imgs = generator(z)
-            g_loss = adversarial_loss(discriminator(gen_imgs), valid)
+            
+            # Adversarial ve L1 loss birleşimi
+            g_loss_adv = adversarial_loss(discriminator(gen_imgs), valid)
+            g_loss_l1 = l1_loss(gen_imgs, real_imgs) * 100  # L1 loss ağırlığı
+            g_loss = g_loss_adv + g_loss_l1
+            
             g_loss.backward()
             optimizer_G.step()
 
@@ -176,29 +194,30 @@ def main():
             d_loss.backward()
             optimizer_D.step()
 
-        print(f"[Epoch {epoch+1}/{num_epochs}] Loss_D: {d_loss.item():.4f}, Loss_G: {g_loss.item():.4f}")
+            if i % 100 == 0:
+                print(
+                    f"[Epoch {epoch+1}/{num_epochs}] [Batch {i}] "
+                    f"[D loss: {d_loss.item():.4f}] "
+                    f"[G adv: {g_loss_adv.item():.4f}] "
+                    f"[G l1: {g_loss_l1.item():.4f}]"
+                )
         
-        # Her 10 epoch'ta bir görüntü kaydet
         if (epoch + 1) % 10 == 0:
             save_generated_images(epoch, generator, fixed_noise)
 
     print("Eğitim tamamlandı!")
 
-    # Sentetik görüntü üretimi
     print("Sentetik görüntüler üretiliyor...")
     generator.eval()
-    num_synthetic_images = 1000  # Her sınıf için üretilecek görüntü sayısı
+    num_synthetic_images = 1000
 
-    # Sentetik görüntüleri kaydetmek için klasör oluştur
     os.makedirs("sentetik_veriler_healthy", exist_ok=True)
 
     with torch.no_grad():
         for i in range(num_synthetic_images):
             z = torch.randn(1, latent_dim, device=device)
             fake_img = generator(z)
-            # Görüntüyü (-1,1) aralığından (0,1)'e çek
             fake_img = (fake_img + 1) / 2
-            # Görüntüyü kaydet
             torchvision.utils.save_image(fake_img, f"sentetik_veriler_healthy/sentetik_goruntu_{i+1}.png")
 
     print(f"Toplam {num_synthetic_images} sentetik görüntü üretildi ve kaydedildi.")
