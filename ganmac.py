@@ -64,17 +64,20 @@ def main():
     class Generator(nn.Module):
         def __init__(self, latent_dim, img_channels):
             super(Generator, self).__init__()
+            
             self.init_size = img_size // 8
+            self.latent_dim = latent_dim
+            
             self.l1 = nn.Sequential(
-                nn.Linear(latent_dim, 256 * self.init_size ** 2),
+                nn.Linear(latent_dim, 512 * self.init_size ** 2),
                 nn.LeakyReLU(0.2)
             )
 
-            self.conv_blocks = nn.Sequential(
-                nn.BatchNorm2d(256),
+            self.conv_blocks = nn.ModuleList([
+                nn.BatchNorm2d(512),
                 
                 nn.Upsample(scale_factor=2),
-                nn.Conv2d(256, 256, 3, stride=1, padding=1),
+                nn.Conv2d(512, 256, 3, stride=1, padding=1),
                 nn.BatchNorm2d(256),
                 nn.LeakyReLU(0.2),
                 
@@ -87,16 +90,22 @@ def main():
                 nn.Conv2d(128, 64, 3, stride=1, padding=1),
                 nn.BatchNorm2d(64),
                 nn.LeakyReLU(0.2),
-                
-                nn.Conv2d(64, img_channels, 3, stride=1, padding=1),
-                nn.Tanh()
-            )
-
+            ])
+            
+            # Düzeltilmiş final katmanı
+            self.final_conv = nn.Conv2d(64, img_channels, 3, stride=1, padding=1)
+            self.final_tanh = nn.Tanh()
+            
         def forward(self, z):
             out = self.l1(z)
-            out = out.view(out.shape[0], 256, self.init_size, self.init_size)
-            img = self.conv_blocks(out)
-            return img
+            out = out.view(out.shape[0], 512, self.init_size, self.init_size)
+            
+            for block in self.conv_blocks:
+                out = block(out)
+            
+            out = self.final_conv(out)
+            out = self.final_tanh(out)
+            return out
 
     # Discriminator Modeli - Daha derin ve güçlü bir yapı
     class Discriminator(nn.Module):
@@ -211,14 +220,14 @@ def main():
     generator.eval()
     num_synthetic_images = 1000
 
-    os.makedirs("sentetik_veriler_healthy", exist_ok=True)
+    os.makedirs("sentetik_veriler_healthy2", exist_ok=True)
 
     with torch.no_grad():
         for i in range(num_synthetic_images):
             z = torch.randn(1, latent_dim, device=device)
             fake_img = generator(z)
             fake_img = (fake_img + 1) / 2
-            torchvision.utils.save_image(fake_img, f"sentetik_veriler_healthy/sentetik_goruntu_{i+1}.png")
+            torchvision.utils.save_image(fake_img, f"sentetik_veriler_healthy2/sentetik_goruntu_{i+1}.png")
 
     print(f"Toplam {num_synthetic_images} sentetik görüntü üretildi ve kaydedildi.")
 
